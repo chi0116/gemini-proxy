@@ -12,9 +12,10 @@ export default async function handler(req, res) {
 
   try {
     const apiKey = req.query.key;
-    // 優先使用 gemini-3.6-flash，若遇到 503 繁忙則自動降級使用 gemini-1.5-flash
-    const models = ['gemini-3.6-flash', 'gemini-1.5-flash'];
+    // 使用目前 Google AI Studio 官方支援的現行模型順序
+    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.6-flash'];
     let lastErrorData = null;
+    let lastStatus = 500;
 
     for (const model of models) {
       const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -27,17 +28,26 @@ export default async function handler(req, res) {
 
       const data = await response.json();
 
-      // 若非 503 繁忙（例如成功 200 或其他錯誤），直接回傳結果
-      if (response.status !== 503) {
-        return res.status(response.status).json(data);
+      // 若成功回傳 200，直接輸出結果
+      if (response.ok) {
+        return res.status(200).json(data);
       }
 
       lastErrorData = data;
-      console.warn(`[Proxy] Model ${model} returned 503, trying fallback model...`);
+      lastStatus = response.status;
+
+      // 若遇到 503 (伺服器過載) 或 404 (舊模型停用)，自動嘗試下一個模型
+      if (response.status === 503 || response.status === 404) {
+        console.warn(`[Proxy] Model ${model} returned ${response.status}, retrying next model...`);
+        continue;
+      }
+
+      // 其他錯誤（如 API Key 權限錯誤）直接回傳
+      return res.status(response.status).json(data);
     }
 
-    // 若所有模型均繁忙，回傳最後的錯誤
-    return res.status(503).json(lastErrorData);
+    // 若所有模型皆失敗，回傳最後的錯誤
+    return res.status(lastStatus).json(lastErrorData);
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
