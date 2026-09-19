@@ -12,41 +12,46 @@ export default async function handler(req, res) {
 
   try {
     const apiKey = req.query.key;
-    // 使用目前 Google AI Studio 官方支援的現行模型順序
-    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.6-flash'];
-    let lastErrorData = null;
-    let lastStatus = 500;
-
-    for (const model of models) {
-      const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-      const response = await fetch(targetUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body)
-      });
-
-      const data = await response.json();
-
-      // 若成功回傳 200，直接輸出結果
-      if (response.ok) {
-        return res.status(200).json(data);
-      }
-
-      lastErrorData = data;
-      lastStatus = response.status;
-
-      // 若遇到 503 (伺服器過載) 或 404 (舊模型停用)，自動嘗試下一個模型
-      if (response.status === 503 || response.status === 404) {
-        console.warn(`[Proxy] Model ${model} returned ${response.status}, retrying next model...`);
-        continue;
-      }
-
-      // 其他錯誤（如 API Key 權限錯誤）直接回傳
-      return res.status(response.status).json(data);
+    if (!apiKey) {
+      return res.status(400).json({ error: { message: "API key is missing" } });
     }
 
-    // 若所有模型皆失敗，回傳最後的錯誤
+    // 備用模型清單
+    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    let lastErrorData = null;
+    let lastStatus = 503;
+
+    for (const model of models) {
+      // 每個模型遇到 503 時自動重試最多 2 次
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+        const response = await fetch(targetUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req.body)
+        });
+
+        const data = await response.json();
+
+        // 成功取得資料，直接回傳
+        if (response.ok) {
+          return res.status(200).json(data);
+        }
+
+        lastErrorData = data;
+        lastStatus = response.status;
+
+        // 若非 503 (例如 400 錯誤)，不需重試該模型
+        if (response.status !== 503) {
+          break;
+        }
+
+        // 若為 503，延遲 1 秒後自動重試
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
     return res.status(lastStatus).json(lastErrorData);
   } catch (error) {
     return res.status(500).json({ error: error.message });
