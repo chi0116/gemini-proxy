@@ -15,60 +15,85 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: { message: "API key is missing" } });
     }
 
-    // 2. 穩定模型優先陣列 (優先使用指定模型 -> Lite 低負載模型 -> Pro 模型 -> Flash)
-    const requestedModel = req.query.model;
-    const fallbackList = [
-      'gemini-2.5-flash-lite', // 負載極低，測試最穩定
-      'gemini-1.5-flash-8b',   // 輕量 8B 版，反應快
-      'gemini-2.5-flash',      // 標準 Flash
-      'gemini-1.5-pro'         // 獨立 Pro 伺服器池備援
-    ];
+    // 預設嘗試模型（優先使用最新 gemini-3.6-flash）
+    const requestedModel = req.query.model || 'gemini-3.6-flash';
 
-    const modelsToTry = requestedModel 
-      ? [requestedModel, ...fallbackList.filter(m => m !== requestedModel)]
-      : fallbackList;
+    // 2. 嘗試呼叫目標模型 (內含 503 重試邏輯)
+    let result = await tryGenerateContent(requestedModel, apiKey, req.body);
 
-    let lastErrorData = null;
-    let lastStatus = 503;
+    // 如果成功，直接回傳結果
+    if (result.ok) {
+      return res.status(200).json(result.data);
+    }
 
-    for (const model of modelsToTry) {
-      // 每個模型最多重試 3 次
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    // 3. 如果遇到 404 (代表該 Model 名稱已失效/下架)，自動向 Google 查詢最新線上可用模型
+    if (result.status === 404) {
+      console.log(`模型 ${requestedModel} 報 404 (已下架)，正在向 Google 查詢最新線上模型...`);
 
-        const response = await fetch(targetUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(req.body)
-        });
+      const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      const listData = await listRes.json();
 
-        const data = await response.json();
+      if (listData.models && listData.models.length > 0) {
+        // 過濾出支援 generateContent 的線上模型
+        const validModels = listData.models.filter(m => 
+          m.supportedGenerationMethods && 
+          m.supportedGenerationMethods.includes('generateContent')
+        );
 
-        // 請求成功，直接回傳
-        if (response.ok) {
-          return res.status(200).json(data);
-        }
+        // 優先挑選名稱含 flash 的模型，若無則挑第一個可用模型
+        const bestModelObj = validModels.find(m => m.name.includes('flash')) || validModels[0];
 
-        lastErrorData = data;
-        lastStatus = response.status;
+        if (bestModelObj) {
+          const realModelName = bestModelObj.name.replace('models/', '');
+          console.log(`自動切換至最新線上模型：${realModelName}`);
 
-        // 若為 404 (模型下架) 或 400 (格式錯誤)，不需重試該 model，直接跳到下一個模型
-        if (response.status === 404 || response.status === 400) {
-          break;
-        }
-
-        // 若為 503 (伺服器爆滿)，採用指數退避演算法 (2s, 4s) 加上隨機微秒，避免同時擠爆伺服器
-        if (response.status === 503) {
-          const delay = Math.pow(2, attempt) * 2000 + Math.random() * 1000;
-          await new Promise(resolve => setTimeout(resolve, delay));
-        } else {
-          break;
+          result = await tryGenerateContent(realModelName, apiKey, req.body);
+          if (result.ok) {
+            return res.status(200).json(result.data);
+          }
         }
       }
     }
 
-    return res.status(lastStatus).json(lastErrorData);
+    // 回傳最終錯誤訊息
+    return res.status(result.status).json(result.data);
+
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
+}
+
+// 輔助函式：帶有 503 指數退避 (Exponential Backoff) 的發送邏輯
+async function tryGenerateContent(model, apiKey, body) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  let lastData = null;
+  let lastStatus = 503;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      return { ok: true, status: 200, data };
+    }
+
+    lastData = data;
+    lastStatus = response.status;
+
+    // 若非 503 爆滿 (例如 404 或 400)，直接跳出不重試此模型
+    if (response.status !== 503) {
+      break;
+    }
+
+    // 遇到 503 爆滿時，進行退避延遲 (2s, 4s...)
+    const delay = Math.pow(2, attempt) * 2000 + Math.random() * 1000;
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+
+  return { ok: false, status: lastStatus, data: lastData };
 }
