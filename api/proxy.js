@@ -16,8 +16,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: { message: "API key is missing" } });
     }
 
-    // 備用模型清單
-    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    // 3. 優先使用 Office Script 傳入的 model，否則使用最新官方支援的模型備用清單
+    const requestedModel = req.query.model;
+    const defaultModels = ['gemini-3.6-flash', 'gemini-1.5-flash'];
+    
+    // 如果有傳入 requestedModel，將其排在第一位嘗試
+    const models = requestedModel 
+      ? [requestedModel, ...defaultModels.filter(m => m !== requestedModel)]
+      : defaultModels;
+
     let lastErrorData = null;
     let lastStatus = 503;
 
@@ -42,7 +49,12 @@ export default async function handler(req, res) {
         lastErrorData = data;
         lastStatus = response.status;
 
-        // 若非 503 (例如 400 錯誤)，不需重試該模型
+        // 若為 404 (模型不存在/已停用) 或 400 (參數錯誤)，不重試這個 model，直接跳出嘗試下一個 model
+        if (response.status === 404 || response.status === 400) {
+          break;
+        }
+
+        // 若非 503，也不需要重試
         if (response.status !== 503) {
           break;
         }
@@ -52,6 +64,7 @@ export default async function handler(req, res) {
       }
     }
 
+    // 如果所有 Model 都失敗，回傳最後一次的錯誤訊息
     return res.status(lastStatus).json(lastErrorData);
   } catch (error) {
     return res.status(500).json({ error: error.message });
