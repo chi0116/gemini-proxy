@@ -15,65 +15,59 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: { message: "API key is missing" } });
     }
 
-    // 2. 優先使用指定的 model，未指定則預設使用 gemini-3.6-flash
-    let targetModel = req.query.model || 'gemini-3.6-flash';
+    // 2. 穩定模型優先陣列 (優先使用指定模型 -> Lite 低負載模型 -> Pro 模型 -> Flash)
+    const requestedModel = req.query.model;
+    const fallbackList = [
+      'gemini-2.5-flash-lite', // 負載極低，測試最穩定
+      'gemini-1.5-flash-8b',   // 輕量 8B 版，反應快
+      'gemini-2.5-flash',      // 標準 Flash
+      'gemini-1.5-pro'         // 獨立 Pro 伺服器池備援
+    ];
 
-    let targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
+    const modelsToTry = requestedModel 
+      ? [requestedModel, ...fallbackList.filter(m => m !== requestedModel)]
+      : fallbackList;
 
-    let response = await fetch(targetUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
+    let lastErrorData = null;
+    let lastStatus = 503;
 
-    let data = await response.json();
+    for (const model of modelsToTry) {
+      // 每個模型最多重試 3 次
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-    // 如果請求成功，直接回傳結果
-    if (response.ok) {
-      return res.status(200).json(data);
-    }
+        const response = await fetch(targetUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req.body)
+        });
 
-    // 3.【關鍵升級】如果遇到 404 (模型已被 Google 下架)，自動查詢 ListModels 取得最新可用模型
-    if (response.status === 404) {
-      console.log(`模型 ${targetModel} 無效 (404)，自動向 Google 查詢最新可用模型...`);
+        const data = await response.json();
 
-      const listModelsUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
-      const listRes = await fetch(listModelsUrl);
-      const listData = await listRes.json();
+        // 請求成功，直接回傳
+        if (response.ok) {
+          return res.status(200).json(data);
+        }
 
-      if (listData.models && listData.models.length > 0) {
-        // 篩選出支援 generateContent 且名稱包含 flash 嘅最新可用模型
-        const activeFlashModel = listData.models.find(m => 
-          m.supportedGenerationMethods && 
-          m.supportedGenerationMethods.includes('generateContent') && 
-          m.name.includes('flash')
-        );
+        lastErrorData = data;
+        lastStatus = response.status;
 
-        if (activeFlashModel) {
-          // 清除 "models/" 字頭取得純模型名稱
-          const activeModelName = activeFlashModel.name.replace('models/', '');
-          console.log(`成功找到替代模型：${activeModelName}`);
+        // 若為 404 (模型下架) 或 400 (格式錯誤)，不需重試該 model，直接跳到下一個模型
+        if (response.status === 404 || response.status === 400) {
+          break;
+        }
 
-          // 自動用最新模型重新發送請求
-          const retryUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModelName}:generateContent?key=${apiKey}`;
-          const retryRes = await fetch(retryUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(req.body)
-          });
-          const retryData = await retryRes.json();
-
-          if (retryRes.ok) {
-            return res.status(200).json(retryData);
-          }
-          return res.status(retryRes.status).json(retryData);
+        // 若為 503 (伺服器爆滿)，採用指數退避演算法 (2s, 4s) 加上隨機微秒，避免同時擠爆伺服器
+        if (response.status === 503) {
+          const delay = Math.pow(2, attempt) * 2000 + Math.random() * 1000;
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          break;
         }
       }
     }
 
-    // 如果非 404 錯誤（如 400 API Key 錯誤），回傳原本的錯誤訊息
-    return res.status(response.status).json(data);
-
+    return res.status(lastStatus).json(lastErrorData);
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
