@@ -1,31 +1,27 @@
-// api/proxy.ts
-export const config = {
-  runtime: 'edge', // 使用 Edge 模式，速度極快且運行於全球海外節點
-};
+// api/proxy.js
+module.exports = async (req, res) => {
+  // 1. 設定 CORS 跨域標頭
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-export default async function handler(req: Request) {
-  // 處理 CORS 預檢請求
+  // 2. 處理 CORS 預檢請求 (Preflight)
   if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      },
-    });
+    return res.status(200).end();
   }
 
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405 });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const body = await req.json();
-    const authHeader = req.headers.get('Authorization') || '';
+    const authHeader = req.headers['authorization'] || '';
 
-    // 由 Vercel 海外伺服器（非香港 IP）發送請求給 OpenRouter
-    const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    // 安全處理傳入的 Request Body
+    const requestBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+
+    // 3. 由 Vercel 海外伺服器（非香港 IP）發送請求至 OpenRouter
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': authHeader,
@@ -33,25 +29,13 @@ export default async function handler(req: Request) {
         'HTTP-Referer': 'https://excel.script',
         'X-Title': 'Excel Schedule Parser'
       },
-      body: JSON.stringify(body),
+      body: requestBody
     });
 
-    const data = await openrouterResponse.json();
+    const data = await response.json();
+    return res.status(response.status).json(data);
 
-    return new Response(JSON.stringify(data), {
-      status: openrouterResponse.status,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
-  } catch (err: any) {
-    return new Response(JSON.stringify({ error: err.message || 'Proxy Internal Error' }), {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Proxy Internal Error' });
   }
-}
+};
