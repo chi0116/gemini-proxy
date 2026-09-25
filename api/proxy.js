@@ -1,11 +1,15 @@
 // api/proxy.js
 module.exports = async (req, res) => {
-  // 1. 設定 CORS 跨域標頭
+  // 1. 強制寫入完整的 CORS 跨域 Header
+  res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
+  );
 
-  // 2. 處理 CORS 預檢請求 (Preflight)
+  // 2. 處理瀏覽器的 OPTIONS 預檢請求
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -20,7 +24,7 @@ module.exports = async (req, res) => {
     // 安全處理傳入的 Request Body
     const requestBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
 
-    // 3. 由 Vercel 海外伺服器（非香港 IP）發送請求至 OpenRouter
+    // 3. 由 Vercel 海外伺服器轉發請求至 OpenRouter
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
